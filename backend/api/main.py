@@ -78,10 +78,21 @@ ZIP_FALLBACK = {
 # Distance brackets in order of importance (miles)
 DISTANCE_BRACKETS = [(1, 25), (26, 50), (51, 100), (101, 9999)]
 
-# Globals (loaded at startup)
+# Globals (loaded at startup or on first request in serverless)
 _df = None
 _vectorizer = None
 _tfidf_matrix = None
+
+
+def ensure_loaded() -> None:
+    """Load trial data and TF-IDF once (for serverless where lifespan may not run)."""
+    global _df, _vectorizer, _tfidf_matrix
+    if _df is not None:
+        return
+    _df = load_trials()
+    texts = [row_text(row) for _, row in _df.iterrows()]
+    _vectorizer = TfidfVectorizer(max_features=10000, stop_words="english", ngram_range=(1, 2))
+    _tfidf_matrix = _vectorizer.fit_transform(texts)
 
 
 def load_trials() -> pd.DataFrame:
@@ -453,11 +464,7 @@ Format as plain text suitable for copy-paste into an email client."""
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _df, _vectorizer, _tfidf_matrix
-    _df = load_trials()
-    texts = [row_text(row) for _, row in _df.iterrows()]
-    _vectorizer = TfidfVectorizer(max_features=10000, stop_words="english", ngram_range=(1, 2))
-    _tfidf_matrix = _vectorizer.fit_transform(texts)
+    ensure_loaded()
     yield
     # cleanup if needed
 
@@ -465,7 +472,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Trial Finder API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://127.0.0.1:5174"],
+    allow_origins=[
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:5174", "http://127.0.0.1:5174",
+    ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -507,11 +518,13 @@ def get_trial_by_id(nct_id: str) -> dict | None:
 
 @app.get("/api/health")
 def health():
+    ensure_loaded()
     return {"status": "ok", "trials_loaded": len(_df) if _df is not None else 0}
 
 
 @app.get("/api/trial/{nct_id}")
 def get_trial(nct_id: str):
+    ensure_loaded()
     trial = get_trial_by_id(nct_id)
     if trial is None:
         raise HTTPException(404, f"Trial {nct_id} not found")
@@ -520,6 +533,7 @@ def get_trial(nct_id: str):
 
 @app.post("/api/chat", response_model=ChatResponse)
 def post_chat(req: ChatRequest):
+    ensure_loaded()
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(503, "OPENAI_API_KEY not configured")
     msgs = [{"role": m.role, "content": m.content} for m in req.messages]
@@ -529,6 +543,7 @@ def post_chat(req: ChatRequest):
 
 @app.post("/api/draft-email", response_model=DraftEmailResponse)
 def post_draft_email(req: DraftEmailRequest):
+    ensure_loaded()
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(503, "OPENAI_API_KEY not configured")
     email = draft_email(req.nct_id, req.patient_summary)
