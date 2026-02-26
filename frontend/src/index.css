@@ -1,0 +1,36 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: 'DM Sans', system-ui, sans-serif;
+  background: #f8fafc;
+}
+
+/* Subtle scrollbar for chat */
+.overflow-y-auto::-webkit-scrollbar {
+  width: 6px;
+}
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 3px;
+}
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Prose styles for markdown in assistant messages */
+.prose p { margin-bottom: 0.5em; }
+.prose p:last-child { margin-bottom: 0; }
+.prose strong { font-weight: 600; color: #1e293b; }
+.prose ul { margin: 0.5em 0; padding-left: 1.25em; }
+.prose li { margin-bottom: 0.25em; }
+.prose code { font-size: 0.9em; padding: 0.15em 0.35em; background: #f1f5f9; border-radius: 4px; }
