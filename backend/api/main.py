@@ -1,28 +1,21 @@
 """
 Trial Finder API — FastAPI backend for chat and email drafting.
+Uses stdlib + openai only (no pandas/sklearn) so Vercel serverless stays under bundle limit.
 """
 import os
 import csv
 import re
 import math
+from collections import Counter
 from contextlib import asynccontextmanager
 
-import pandas as pd
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
 
-try:
-    import pgeocode
-    _GEO = pgeocode.Nominatim("us")
-except Exception:
-    # ImportError, SSL cert errors, or network failure during pgeocode data download
-    _GEO = None
+_GEO = None  # pgeocode omitted for Vercel bundle size; ZIP_FALLBACK used
 
 load_dotenv()
 
@@ -79,66 +72,92 @@ ZIP_FALLBACK = {
 DISTANCE_BRACKETS = [(1, 25), (26, 50), (51, 100), (101, 9999)]
 
 # Globals (loaded at startup or on first request in serverless)
-_df = None
-_vectorizer = None
-_tfidf_matrix = None
+_rows: list[dict] | None = None
+_doc_counters: list[Counter] | None = None
+_idf: dict | None = None
+
+_STOP = frozenset(
+    "a an and are as at be by for from has he in is it its of on that the to was were will with".split()
+)
 
 
 def ensure_loaded() -> None:
-    """Load trial data and TF-IDF once (for serverless where lifespan may not run)."""
-    global _df, _vectorizer, _tfidf_matrix
-    if _df is not None:
+    """Load trial data and search index once (for serverless where lifespan may not run)."""
+    global _rows, _doc_counters, _idf
+    if _rows is not None:
         return
-    _df = load_trials()
-    texts = [row_text(row) for _, row in _df.iterrows()]
-    _vectorizer = TfidfVectorizer(max_features=10000, stop_words="english", ngram_range=(1, 2))
-    _tfidf_matrix = _vectorizer.fit_transform(texts)
+    _rows = load_trials()
+    texts = [row_text(r) for r in _rows]
+    doc_tokens = [_tokenize(t) for t in texts]
+    _doc_counters = [Counter(toks) for toks in doc_tokens]
+    doc_freq: Counter = Counter()
+    for toks in doc_tokens:
+        doc_freq.update(set(toks))
+    n_docs = len(_rows) + 1
+    _idf = {t: math.log(n_docs / (doc_freq[t] + 1)) + 1 for t in doc_freq}
 
 
-def load_trials() -> pd.DataFrame:
+def _tokenize(text: str) -> list[str]:
+    toks = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return [t for t in toks if t not in _STOP and len(t) > 1]
+
+
+def load_trials() -> list[dict]:
     base = os.path.dirname(__file__)
     for name in CSV_PATHS:
         path = os.path.join(base, "..", name)
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
-            return pd.DataFrame(rows)
+                rows = list(csv.DictReader(f))
+            return [_normalize_row(r) for r in rows]
     raise FileNotFoundError(
         f"Trial data not found. Tried: {', '.join(CSV_PATHS)}. "
         "Run from backend/: python a.py (Gainesville + Los Angeles) or python a.py --gainesville-only"
     )
 
 
-def row_text(r) -> str:
+def _normalize_row(r: dict) -> dict:
+    return {k: _safe_val(v) for k, v in r.items()}
+
+
+def row_text(r: dict) -> str:
     parts = [
         str(r.get("title", "")),
         str(r.get("conditions", "")),
-        str(r.get("brief_summary", ""))[:800],
+        (str(r.get("brief_summary", "")) or "")[:800],
         str(r.get("interventions", "")),
-        str(r.get("primary_outcomes", ""))[:300],
-        str(r.get("secondary_outcomes", ""))[:300],
+        (str(r.get("primary_outcomes", "")) or "")[:300],
+        (str(r.get("secondary_outcomes", "")) or "")[:300],
     ]
     return " | ".join(p for p in parts if p and p != "nan")
 
 
 def search_trials(query: str, top_k: int = TOP_K) -> list[dict]:
-    global _df, _vectorizer, _tfidf_matrix
-    q_vec = _vectorizer.transform([query])
-    scores = cosine_similarity(_tfidf_matrix, q_vec).flatten()
-    idx = np.argsort(scores)[::-1][:top_k]
+    global _rows, _doc_counters, _idf
+    if _rows is None or _doc_counters is None or _idf is None:
+        ensure_loaded()
+    q_toks = _tokenize(query)
+    if not q_toks:
+        return (_rows or [])[:top_k]
+    scored: list[tuple[float, int]] = []
+    for idx, doc_cnt in enumerate(_doc_counters or []):
+        score = sum(doc_cnt.get(t, 0) * (_idf or {}).get(t, 1) for t in q_toks)
+        scored.append((score, idx))
+    scored.sort(key=lambda x: -x[0])
     out = []
-    for i in idx:
-        row = _df.iloc[i]
-        out.append({k: _safe_val(row.get(k)) for k in row.index})
+    rows = _rows or []
+    for _, idx in scored[:top_k]:
+        out.append(rows[idx])
     return out
 
 
-def _safe_val(v):
-    if pd.isna(v):
+def _safe_val(v) -> str:
+    if v is None:
         return ""
-    s = str(v)
-    return "" if s == "nan" else s
+    s = str(v).strip()
+    if s == "" or s.lower() == "nan":
+        return ""
+    return s
 
 
 def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -422,12 +441,9 @@ def chat(messages: list[dict], patient_zip: str | None = None) -> tuple[str, lis
 
 
 def draft_email(nct_id: str, patient_summary: str) -> str:
-    global _df
-    match = _df[_df["nct_id"].astype(str) == str(nct_id)]
-    if match.empty:
+    row_dict = get_trial_by_id(nct_id)
+    if row_dict is None:
         raise HTTPException(404, f"Trial {nct_id} not found")
-    row = match.iloc[0]
-    row_dict = {k: _safe_val(row.get(k)) for k in row.index}
 
     contacts = row_dict.get("contacts", "")
     title = row_dict.get("title", "")
@@ -508,18 +524,19 @@ class DraftEmailResponse(BaseModel):
 
 
 def get_trial_by_id(nct_id: str) -> dict | None:
-    global _df
-    match = _df[_df["nct_id"].astype(str) == str(nct_id)]
-    if match.empty:
-        return None
-    row = match.iloc[0]
-    return {k: _safe_val(row.get(k)) for k in row.index}
+    if _rows is None:
+        ensure_loaded()
+    nct = str(nct_id).strip().upper()
+    for r in _rows or []:
+        if str(r.get("nct_id", "")).strip().upper() == nct:
+            return dict(r)
+    return None
 
 
 @app.get("/api/health")
 def health():
     ensure_loaded()
-    return {"status": "ok", "trials_loaded": len(_df) if _df is not None else 0}
+    return {"status": "ok", "trials_loaded": len(_rows) if _rows is not None else 0}
 
 
 @app.get("/api/trial/{nct_id}")
