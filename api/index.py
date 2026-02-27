@@ -1,11 +1,12 @@
 """
-Vercel serverless catch-all for FastAPI. Handles all /api/* routes.
-Vercel expects a class "handler(BaseHTTPRequestHandler)" - we proxy to the FastAPI ASGI app.
+Single API entry for Vercel. All /api/* requests are rewritten here.
+Vercel requires a class "handler(BaseHTTPRequestHandler)" - we proxy to FastAPI.
 """
 import asyncio
 import os
 import sys
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 
 # Repo root = parent of api/ so "backend" package can be imported
 _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -50,12 +51,20 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle(self):
-        # Read body for POST/PUT/PATCH
+        # Original path: rewrite may pass as query ?path=chat or ?path=trial/NCT123
+        path = self.path.split("?")[0] if "?" in self.path else self.path
+        query_part = self.path.split("?", 1)[1] if "?" in self.path else ""
+        query_string = query_part.encode() if query_part else b""
+
+        # If we were rewritten from /api/xxx, path might be /api/index; get real path from query
+        if path.rstrip("/") in ("/api", "/api/index"):
+            params = parse_qs(query_part)
+            if "path" in params and params["path"]:
+                path = "/api/" + params["path"][0].strip("/")
+
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length else b""
-        # Build ASGI scope
-        path = self.path.split("?")[0] if "?" in self.path else self.path
-        query_string = self.path.split("?", 1)[1].encode() if "?" in self.path else b""
+
         scope = {
             "type": "http",
             "method": self.command,
@@ -93,4 +102,4 @@ class handler(BaseHTTPRequestHandler):
         self._handle()
 
     def log_message(self, format, *args):
-        pass  # Suppress default request logging
+        pass
