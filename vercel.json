@@ -1,5 +1,10 @@
 {
   "buildCommand": "cd frontend && npm install && npm run build",
   "outputDirectory": "frontend/dist",
-  "framework": null
+  "framework": null,
+  "functions": {
+    "api/**/*.py": {
+      "includeFiles": "backend/**"
+    }
+  }
 }

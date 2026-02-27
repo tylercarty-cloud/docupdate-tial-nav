@@ -1,5 +1,5 @@
 # Slim deps for Vercel serverless (no pandas/sklearn = small bundle)
+# No Mangum: Vercel runs ASGI `app` directly
 openai>=1.0.0
 python-dotenv>=1.0.0
 fastapi>=0.109.0
-mangum>=0.17.0

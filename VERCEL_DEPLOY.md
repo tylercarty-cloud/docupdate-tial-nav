@@ -54,6 +54,9 @@ If you use React Router (or similar) and want routes like `/trial/NCT123` to loa
 
 ## Troubleshooting
 
+- **500 / FUNCTION_INVOCATION_FAILED**  
+  The API handler was updated to export the FastAPI `app` as ASGI (Vercel runs it directly; Mangum is not used). Ensure `backend/**` is included via `functions` in `vercel.json`, and that trial CSV files exist under `backend/`. Check the **Logs** tab for the real exception (e.g. `ModuleNotFoundError`, `FileNotFoundError`).
+
 - **404 on the app**  
   - Confirm **Build Command** and **Output Directory** match `vercel.json`: build from `frontend/`, output `frontend/dist`.
 

@@ -103,16 +103,22 @@ def _tokenize(text: str) -> list[str]:
 
 
 def load_trials() -> list[dict]:
-    base = os.path.dirname(__file__)
+    # Try multiple bases so it works from backend/, project root, or Vercel deployment
+    api_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.normpath(os.path.join(api_dir, ".."))
+    cwd = os.getcwd()
+    candidates = []
     for name in CSV_PATHS:
-        path = os.path.join(base, "..", name)
-        if os.path.exists(path):
+        candidates.append(os.path.join(backend_dir, name))
+        candidates.append(os.path.join(cwd, "backend", name))
+        candidates.append(os.path.join(cwd, name))
+    for path in candidates:
+        if os.path.isfile(path):
             with open(path, "r", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
             return [_normalize_row(r) for r in rows]
     raise FileNotFoundError(
-        f"Trial data not found. Tried: {', '.join(CSV_PATHS)}. "
-        "Run from backend/: python a.py (Gainesville + Los Angeles) or python a.py --gainesville-only"
+        f"Trial data not found. Tried: {CSV_PATHS}. Paths checked: {candidates[:6]}"
     )
 
 
